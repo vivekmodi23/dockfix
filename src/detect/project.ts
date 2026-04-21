@@ -3,7 +3,6 @@ import path from "path";
 
 export function detectProject(target: string = ".") {
   const pkgPath = path.join(target, "package.json");
-
   if (!fs.existsSync(pkgPath)) {
     return "Not a Node.js project";
   }
