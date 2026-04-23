@@ -25,6 +25,7 @@ export function repoBaseName(repository: string): string {
 /** hostPort:containerPort for `docker run -p` */
 function runPortPair(projectType: string): { hostPort: number; containerPort: number } {
   if (projectType === "Vite project") return { hostPort: 3000, containerPort: 80 };
+  if (projectType === "Streamlit project") return { hostPort: 8501, containerPort: 8501 };
   return { hostPort: 3000, containerPort: 3000 };
 }
 
@@ -189,8 +190,8 @@ export async function runCloneWorkflow(
   console.log(`Detected: ${result}`);
 
   if (opts.useAi) {
-    if (result === "Not a Node.js project") {
-      console.log("AI dockerize skipped (not a Node project).");
+    if (result === "Unsupported project") {
+      console.log("AI dockerize skipped (unsupported project type).");
       return;
     }
     const tag = `dockfix-${dockerSafeTag(folder)}`;
@@ -205,9 +206,9 @@ export async function runCloneWorkflow(
 
   generateDockerFiles(dest, result);
 
-  if (opts.skipBuild || result === "Not a Node.js project") {
-    if (result === "Not a Node.js project") {
-      console.log("Skipping Docker build (no package.json / not a Node project).");
+  if (opts.skipBuild || result === "Unsupported project") {
+    if (result === "Unsupported project") {
+      console.log("Skipping Docker build (unsupported project type).");
     }
     return;
   }

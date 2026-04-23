@@ -19,6 +19,20 @@ coverage
 .DS_Store
 `;
 
+const PYTHON_DOCKERIGNORE = `__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv
+venv
+env
+.env
+.env.*
+.git
+.DS_Store
+`;
+
 function readPackageJson(target: string): PackageJson {
   const pkgPath = path.join(target, "package.json");
   return JSON.parse(fs.readFileSync(pkgPath, "utf-8")) as PackageJson;
@@ -85,6 +99,37 @@ ${prodEnv}EXPOSE 3000
 
   dockerfile += "\n";
   dockerfile += formatCmd(cmdFromScripts(scripts));
+
+  writeArtifacts(target, dockerfile, DEFAULT_DOCKERIGNORE);
+}
+
+/** Create React App: build/ + serve (pin serve@14 for a stable CLI) */
+function createReactAppDocker(target: string) {
+  const dockerfile = `# Create React App (react-scripts) — static build + serve
+FROM node:18-alpine AS builder
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+ENV CI=true
+ENV NODE_ENV=production
+RUN npm run build
+
+FROM node:18-alpine
+
+WORKDIR /app
+
+RUN npm install -g serve@14
+
+COPY --from=builder /app/build ./build
+
+EXPOSE 3000
+
+CMD ["serve", "-s", "build", "-l", "3000"]
+`;
 
   writeArtifacts(target, dockerfile, DEFAULT_DOCKERIGNORE);
 }
@@ -159,15 +204,39 @@ CMD ["nginx", "-g", "daemon off;"]
   writeArtifacts(target, dockerfile, DEFAULT_DOCKERIGNORE);
 }
 
+function streamlitDocker(target: string) {
+  const appCandidates = ["app.py", "streamlit_app.py", "main.py"];
+  const appFile = appCandidates.find((name) => fs.existsSync(path.join(target, name))) || "app.py";
+
+  const dockerfile = `FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements*.txt ./
+RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
+
+COPY . .
+
+EXPOSE 8501
+
+CMD ["streamlit", "run", "${appFile}", "--server.address=0.0.0.0", "--server.port=8501"]
+`;
+
+  writeArtifacts(target, dockerfile, PYTHON_DOCKERIGNORE);
+}
+
 export function generateDockerFiles(target: string, projectType: string) {
-  if (projectType === "Not a Node.js project") {
-    console.log("No package.json found; skipping Docker generation.");
+  if (projectType === "Unsupported project") {
+    console.log("No supported project type detected; skipping Docker generation.");
     return;
   }
 
   switch (projectType) {
     case "Next.js project":
       nextDocker(target);
+      break;
+    case "Create React App project":
+      createReactAppDocker(target);
       break;
     case "NestJS project":
       nestDocker(target);
@@ -183,6 +252,9 @@ export function generateDockerFiles(target: string, projectType: string) {
       break;
     case "Node.js project":
       nodeRuntimeDocker(target, "node");
+      break;
+    case "Streamlit project":
+      streamlitDocker(target);
       break;
     default:
       console.log(`Unknown project type "${projectType}"; skipping Docker generation.`);

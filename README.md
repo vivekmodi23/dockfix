@@ -5,10 +5,12 @@
 ## Supported project types
 
 - Next.js
+- Create React App (`react-scripts`)
 - NestJS
 - Express
 - Fastify
 - Vite (static build served by nginx)
+- Streamlit (Python)
 - Generic Node.js (fallback)
 
 ## Install

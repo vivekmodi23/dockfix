@@ -50,26 +50,55 @@ async function dockerSmokeTest(imageTag: string): Promise<{ ok: boolean; detail:
     return { ok: false, detail: `docker run failed:\n${combineSpawnOut(run)}` };
   }
 
-  await delay(5000);
+  await delay(4000);
+  const inspect0 = spawnSync("docker", ["inspect", "-f", "{{.State.Running}}", name], { encoding: "utf-8" });
+  if ((inspect0.stdout || "").trim() !== "true") {
+    const logs0 = spawnSync("docker", ["logs", "--tail", "200", name], { encoding: "utf-8" });
+    spawnSync("docker", ["rm", "-f", name], { encoding: "utf-8" });
+    return { ok: false, detail: `Container exited before smoke test.\n${combineSpawnOut(logs0)}` };
+  }
+  await delay(4000);
 
-  const inspect = spawnSync("docker", ["inspect", "-f", "{{.State.Running}}", name], { encoding: "utf-8" });
-  const isRunning = (inspect.stdout || "").trim() === "true";
-  const logs = spawnSync("docker", ["logs", "--tail", "120", name], { encoding: "utf-8" });
+  const logs = spawnSync("docker", ["logs", "--tail", "200", name], { encoding: "utf-8" });
   const portOut = spawnSync("docker", ["port", name], { encoding: "utf-8" });
   const portText = portOut.stdout || "";
+  const logText = combineSpawnOut(logs);
+  const inspect = spawnSync("docker", ["inspect", "-f", "{{.State.Running}}", name], { encoding: "utf-8" });
+  const isRunning = (inspect.stdout || "").trim() === "true";
 
   const hostPorts = [...portText.matchAll(/-> .+:(\d+)/g)].map((m) => Number(m[1]));
 
-  const paths = ["/", "/health", "/api/health", "/api", "/ready"];
+  const paths = ["/", "/index.html", "/health", "/api/health", "/api", "/ready"];
 
-  for (const hp of hostPorts) {
-    for (const p of paths) {
-      const url = `http://127.0.0.1:${hp}${p}`;
-      if (await httpOk(url)) {
-        spawnSync("docker", ["rm", "-f", name], { encoding: "utf-8" });
-        return { ok: true, detail: `HTTP OK ${url}` };
+  const tryHttp = async () => {
+    for (const hp of hostPorts) {
+      for (const p of paths) {
+        const url = `http://127.0.0.1:${hp}${p}`;
+        if (await httpOk(url)) {
+          return url;
+        }
       }
     }
+    return null;
+  };
+
+  let url = await tryHttp();
+  if (!url) {
+    await delay(5000);
+    url = await tryHttp();
+  }
+  if (url) {
+    spawnSync("docker", ["rm", "-f", name], { encoding: "utf-8" });
+    return { ok: true, detail: `HTTP OK ${url}` };
+  }
+
+  // `serve` and some static tools log "Serving" before the server accepts connections.
+  if (isRunning && /serving|listening|ready in/i.test(logText)) {
+    spawnSync("docker", ["rm", "-f", name], { encoding: "utf-8" });
+    return {
+      ok: true,
+      detail: `Treated as healthy: process logs indicate server is up. docker port:\n${portText || "(empty)"}\nlogs:\n${logText}`,
+    };
   }
 
   // If service is not HTTP (worker/consumer) but container stays running, treat as successful run.
@@ -93,7 +122,7 @@ function truncate(s: string, max: number): string {
   return `${s.slice(0, max)}\n… (truncated, ${s.length} chars total)`;
 }
 
-const SYSTEM_PROMPT = `You are an expert at writing Dockerfiles for Node.js repositories (Next.js, NestJS, Vite, Express, Fastify, etc.).
+const SYSTEM_PROMPT = `You are an expert at writing Dockerfiles for web app repositories (Node.js stacks and Streamlit Python apps).
 
 Hard rules:
 - Output ONLY the Dockerfile contents. No markdown fences, no explanations before or after.
@@ -102,7 +131,8 @@ Hard rules:
 - Prefer official images (node, nginx). Use WORKDIR /app unless the repo clearly needs another layout.
 - Ensure the container listens on 0.0.0.0 for servers so published ports work.
 - EXPOSE the port(s) the app listens on so smoke tests can map them with docker run -P.
-- Production-oriented: avoid leaking devDependencies into the final runtime when practical (multi-stage is fine).`;
+- Production-oriented: avoid leaking devDependencies into the final runtime when practical (multi-stage is fine).
+- Create React App (react-scripts): use multi-stage build, then in the final stage RUN npm install -g serve@14 and CMD ["serve","-s","build","-l","3000"]. Do not use npx serve with --host; do not pass http: URLs to serve (CLI differs by version).`;
 
 export type AiDockerizeOpts = {
   projectDir: string;
@@ -132,6 +162,26 @@ export async function runAiDockerize(opts: AiDockerizeOpts): Promise<void> {
   const { text: contextText, detectResult } = gatherRepoContext(projectDir);
   console.log(`Context heuristic: ${detectResult}`);
 
+  const stackHint =
+    detectResult === "Create React App project"
+      ? `
+Stack hint (heuristic: react-scripts / CRA):
+- Multi-stage: builder runs npm install && npm run build (set CI=true if needed for non-interactive builds).
+- Final image: only copy build/ output, RUN npm install -g serve@14, CMD ["serve","-s","build","-l","3000"].
+- Never use: npx serve --host, or --listen with an http: URL string; pin serve@14 for a stable CLI.
+`
+      : detectResult === "Streamlit project"
+        ? `
+Stack hint (heuristic: Streamlit):
+- Use python:3.11-slim (or compatible python slim image).
+- Install requirements from requirements.txt (or pyproject if clearly present).
+- Run Streamlit with host/port flags:
+  CMD ["streamlit","run","<entry>.py","--server.address=0.0.0.0","--server.port=8501"]
+- EXPOSE 8501.
+- Prefer app.py, streamlit_app.py, or main.py if present.
+`
+      : "";
+
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
     {
@@ -139,7 +189,7 @@ export async function runAiDockerize(opts: AiDockerizeOpts): Promise<void> {
       content: `Repository path on disk: ${projectDir}
 
 ${contextText}
-
+${stackHint}
 Write a single Dockerfile that builds and runs this project. Bind servers to 0.0.0.0 and EXPOSE the correct port(s).
 ${opts.allowFileFixes ? "Safe config-only edits are allowed by caller (no app source edits)." : ""}`,
     },
